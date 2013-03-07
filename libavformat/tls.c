@@ -46,6 +46,21 @@
         if (c->ctx) \
             SSL_CTX_free(c->ctx); \
     } while (0)
+#elif CONFIG_NSS
+#include <nspr.h>
+#include <nss.h>
+#include <prinit.h>
+#include <prio.h>
+#include <private/pprio.h>
+#include <prnetdb.h>
+#include <ssl.h>
+#define TLS_read(c, buf, size) PR_Read(c->nssfd, buf, size)
+#define TLS_write(c, buf, size) PR_Write(c->nssfd, buf, size)
+#define TLS_shutdown(c) PR_Close(c->nssfd)
+#define TLS_free(c) do { \
+        if (c->nssai) \
+            PR_FreeAddrInfo(c->nssai); \
+        } while (0)
 #endif
 #include "network.h"
 #include "os_support.h"
@@ -63,9 +78,22 @@ typedef struct {
 #elif CONFIG_OPENSSL
     SSL_CTX *ctx;
     SSL *ssl;
+#elif CONFIG_NSS
+    PRAddrInfo *nssai;
+    PRFileDesc *nssfd;
+    PRStatus cstatus;
+    SECStatus status;
 #endif
     int fd;
 } TLSContext;
+
+#if CONFIG_NSS
+static SECStatus nss_auth_cert_hook(void *arg, PRFileDesc * socket,
+                                    PRBool checksig, PRBool isserver)
+{
+    return SECSuccess;
+}
+#endif
 
 static int do_tls_poll(URLContext *h, int ret)
 {
@@ -90,6 +118,22 @@ static int do_tls_poll(URLContext *h, int ret)
         av_log(h, AV_LOG_ERROR, "%s\n", ERR_error_string(ERR_get_error(), NULL));
         return AVERROR(EIO);
     }
+#elif CONFIG_NSS
+    PRPollDesc prdesc;
+
+    prdesc.fd = c->nssfd;
+    prdesc.in_flags = PR_POLL_READ | PR_POLL_WRITE;
+
+    ret = PR_Poll(&prdesc, 1, PR_INTERVAL_NO_TIMEOUT);
+    if (ret < 1) {
+        av_log(h, AV_LOG_ERROR, "Cannot poll.\n");
+        return AVERROR(EIO);
+    }
+
+    if (prdesc.out_flags & PR_POLL_READ)
+        p.events = POLLIN;
+    else if (prdesc.out_flags & PR_POLL_WRITE)
+        p.events = POLLOUT;
 #endif
     if (h->flags & AVIO_FLAG_NONBLOCK)
         return AVERROR(EAGAIN);
@@ -191,6 +235,92 @@ static int tls_open(URLContext *h, const char *uri, int flags)
         if ((ret = do_tls_poll(h, ret)) < 0)
             goto fail;
     }
+#elif CONFIG_NSS
+    PR_Init(PR_USER_THREAD, PR_PRIORITY_NORMAL, 0);
+    
+    c->status = NSS_NoDB_Init(NULL);
+    if (c->status != SECSuccess) {
+        av_log(h, AV_LOG_ERROR, "Cannot snitialize NSS.\n");
+        ret = AVERROR(EIO);
+        goto fail;
+    }
+
+    c->status = NSS_SetDomesticPolicy();
+    if (c->status != SECSuccess) {
+        av_log(h, AV_LOG_ERROR, "Cannot initialize NSS ciphers.\n");
+        ret = AVERROR(EIO);
+        goto fail;
+    }
+
+    c->nssfd = SSL_ImportFD(NULL, PR_ImportTCPSocket(c->fd));
+    if (!c->nssfd) {
+        av_log(h, AV_LOG_ERROR, "Cannot import URL descriptor with NSS.\n");
+        ret = AVERROR(EIO);
+        goto fail;
+    }
+
+    c->status = SSL_OptionSet(c->nssfd, SSL_SECURITY, PR_TRUE);
+    if (c->status != SECSuccess) {
+        av_log(h, AV_LOG_ERROR, "Cannot enable SSL security.\n");
+        ret = AVERROR(EIO);
+        goto fail;
+    }
+
+    c->status = SSL_OptionSet(c->nssfd, SSL_HANDSHAKE_AS_CLIENT, PR_TRUE);
+    if (c->status != SECSuccess) {
+        av_log(h, AV_LOG_ERROR, "Cannot enable client-style handshake.\n");
+        ret = AVERROR(EIO);
+        goto fail;
+    }
+
+    c->status = SSL_AuthCertificateHook(c->nssfd, nss_auth_cert_hook, NULL);
+    if (c->status != SECSuccess) {
+        av_log(h, AV_LOG_ERROR,
+               "Cannot register cetrificate auth callback function with NSS.\n");
+        ret = AVERROR(EIO);
+        goto fail;
+    }
+
+    if (!numerichost) {
+       ret = SSL_SetURL(c->nssfd, host);
+       if (ret < 0) {
+           av_log(h, AV_LOG_ERROR, "Cannot set hostname with NSS.\n");
+           goto fail;
+       }
+    }
+/*
+    c->nssai = PR_GetAddrInfoByName(host, PR_AF_INET, NULL); <-- wrong struct anyway
+    if (!c->nssai) {
+        av_log(h, AV_LOG_ERROR, "Could not get address info with NSS.\n");
+        ret = AVERROR(EIO);
+        goto fail
+    }
+
+    c->cstatus = PR_Connect(c->nssfd, c->nssai, PR_INTERVAL_NO_TIMEOUT);
+    if (c->cstatus != PR_SUCCESS) {
+        av_log(h, AV_LOG_ERROR, "Could not create TLS/SSL session.\n");
+        ret = AVERROR(EIO);
+        goto fail;
+    }*/
+
+    c->status = SSL_ResetHandshake(c->nssfd, PR_FALSE);
+    if (c->status != SECSuccess) {
+        av_log(h, AV_LOG_ERROR, "Cannot reset HandShake.\n");
+        ret = AVERROR(EIO);
+        goto fail;
+    }
+
+    c->status = SSL_ForceHandshake(c->nssfd);
+    if (c->status != SECSuccess) {
+        av_log(h, AV_LOG_ERROR, "Could not negotiate TLS/SSL session.\n");
+        ret = AVERROR(EIO);
+        goto fail;
+    }
+
+//    while(1) {
+//        if ((ret = do_tls_poll(h, 0)) < 0)
+//            goto fail;
+//    }
 #endif
     return 0;
 fail:

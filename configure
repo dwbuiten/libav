@@ -203,6 +203,7 @@ External library support:
   --enable-libxavs         enable AVS encoding via xavs [no]
   --enable-libxvid         enable Xvid encoding via xvidcore,
                            native MPEG-4/Xvid encoder exists [no]
+  --enable-nss             enable NSS [no]
   --enable-openssl         enable openssl [no]
   --enable-x11grab         enable X11 grabbing [no]
   --enable-zlib            enable zlib [autodetect]
@@ -1055,6 +1056,7 @@ EXTERNAL_LIBRARY_LIST="
     libx264
     libxavs
     libxvid
+    nss
     openssl
     x11grab
     zlib
@@ -1819,7 +1821,7 @@ sctp_protocol_deps="struct_sctp_event_subscribe"
 sctp_protocol_select="network"
 srtp_protocol_select="rtp_protocol"
 tcp_protocol_select="network"
-tls_protocol_deps_any="openssl gnutls"
+tls_protocol_deps_any="openssl gnutls nss"
 tls_protocol_select="tcp_protocol"
 udp_protocol_select="network"
 
@@ -3569,6 +3571,7 @@ enabled libx264    && require  libx264 x264.h x264_encoder_encode -lx264 &&
                         die "ERROR: libx264 version must be >= 0.118."; }
 enabled libxavs    && require  libxavs xavs.h xavs_encoder_encode -lxavs
 enabled libxvid    && require  libxvid xvid.h xvid_global -lxvidcore
+enabled nss        && require_pkg_config nss nss.h NSS_Init
 enabled openssl    && { check_lib openssl/ssl.h SSL_library_init -lssl -lcrypto ||
                         check_lib openssl/ssl.h SSL_library_init -lssl32 -leay32 ||
                         check_lib openssl/ssl.h SSL_library_init -lssl -lcrypto -lws2_32 -lgdi32 ||
